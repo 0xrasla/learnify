@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>WebRTC Voice Chat</title>
+  </head>
+  <body>
+    <h1>WebRTC Voice Chat</h1>
+    <div>
+      <button id="start-call">Start Call</button>
+      <button id="end-call" disabled>End Call</button>
+    </div>
+    <audio id="remote-audio" autoplay></audio>
+
+    <div>
+      <video id="local-video" autoplay muted></video>
+      <video id="remote-video" autoplay></video>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+      const socket = io();
+      const peerConnection = new RTCPeerConnection({
+        iceServers: [
+          { urls: "stun:freestun.net:5350" },
+          {
+            urls: "turns:freestun.tel:5350",
+            username: "free",
+            credential: "free",
+          },
+        ],
+        iceCandidatePoolSize: 10,
+        iceTransportPolicy: "relay",
+      });
+
+      const startCall = document.getElementById("start-call");
+      const endCall = document.getElementById("end-call");
+      const remoteAudio = document.getElementById("remote-audio");
+      const localVideo = document.getElementById("local-video");
+      const remoteVideo = document.getElementById("remote-video");
+
+      let localStream;
+      let remoteStream;
+
+      function ensureCorrectMLineOrder(sdp) {
+        const mediaLines = sdp
+          .split("\n")
+          .filter((line) => line.startsWith("m="));
+        const audioLines = mediaLines.filter((line) => line.includes("audio"));
+        const videoLines = mediaLines.filter((line) => line.includes("video"));
+        const dataLines = mediaLines.filter((line) =>
+          line.includes("application")
+        );
+
+        const orderedLines = [];
+        orderedLines.push(...audioLines);
+        orderedLines.push(...videoLines);
+        orderedLines.push(...dataLines);
+
+        const orderedSdp = sdp.replace(
+          /m=.*\n/g,
+          () => orderedLines.shift() + "\n"
+        );
+        return orderedSdp;
+      }
+
+      startCall.addEventListener("click", async () => {
+        try {
+          localStream = await navigator.mediaDevices.getUserMedia({
+            audio: true,
+            video: true,
+          });
+
+          localVideo.srcObject = localStream;
+
+          localStream.getTracks().forEach((track) => {
+            peerConnection.addTrack(track, localStream);
+          });
+
+          const offer = await peerConnection.createOffer();
+          await peerConnection.setLocalDescription(offer);
+
+          socket.emit("join-room", "room-id", "user-id");
+          socket.emit("offer", offer, "room-id");
+        } catch (err) {
+          console.error("Error creating offer:", err);
+        }
+      });
+
+      endCall.addEventListener("click", () => {
+        // Close the peer connection
+        peerConnection.close();
+        localStream.getTracks().forEach((track) => track.stop());
+        remoteStream.getTracks().forEach((track) => track.stop());
+        remoteAudio.srcObject = null;
+      });
+
+      socket.on("user-connected", (userId) => {
+        console.log(`User ${userId} connected`);
+      });
+
+      socket.on("user-disconnected", (userId) => {
+        console.log(`User ${userId} disconnected`);
+      });
+
+      socket.on("offer", async (offer) => {
+        try {
+          const orderedOffer = ensureCorrectMLineOrder(offer.sdp);
+          const remoteDesc = new RTCSessionDescription({
+            type: offer.type,
+            sdp: orderedOffer,
+          });
+          await peerConnection.setRemoteDescription(remoteDesc);
+          const answer = await peerConnection.createAnswer();
+          await peerConnection.setLocalDescription(answer);
+          socket.emit("answer", answer, "room-id");
+        } catch (err) {
+          console.error("Error creating answer:", err);
+        }
+      });
+
+      socket.on("answer", async (answer) => {
+        try {
+          const orderedAnswer = ensureCorrectMLineOrder(answer.sdp);
+          const remoteDesc = new RTCSessionDescription({
+            type: answer.type,
+            sdp: orderedAnswer,
+          });
+          await peerConnection.setRemoteDescription(remoteDesc);
+        } catch (err) {
+          console.error("Error setting remote description:", err);
+        }
+      });
+
+      socket.on("ice-candidate", async (iceCandidate) => {
+        try {
+          await peerConnection.addIceCandidate(iceCandidate);
+        } catch (err) {
+          console.error("Error adding ICE candidate:", err);
+        }
+      });
+
+      peerConnection.ontrack = (event) => {
+        if (event.track.kind === "video") {
+          if (!remoteStream) {
+            remoteStream = new MediaStream();
+            remoteVideo.srcObject = remoteStream;
+          }
+          remoteStream.addTrack(event.track, remoteStream);
+        } else if (event.track.kind === "audio") {
+          if (!remoteStream) {
+            remoteStream = new MediaStream();
+            remoteAudio.srcObject = remoteStream;
+            remoteAudio.autoplay = true;
+            remoteAudio.controls = true;
+          }
+          remoteStream.addTrack(event.track, remoteStream);
+        }
+      };
+    </script>
+  </body>
+</html>
